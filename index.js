@@ -10,6 +10,7 @@ const {
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
   generateWAMessageFromContent,
+  Browsers,
   proto,
 } = require('@whiskeysockets/baileys');
 const config = require('./config');
@@ -129,6 +130,13 @@ async function startBot(mode) {
   const { state, saveCreds } = await useMultiFileAuthState('session');
   const { version } = await fetchLatestBaileysVersion();
   let pairingRequested = false;
+  let pairingPhone = '';
+
+  if (mode === 'pairing' && !state.creds.registered) {
+    const rawPhone = process.env.PHONE_NUMBER || await ask('Número con código de país (ejemplo 59899123456): ');
+    pairingPhone = normalizePhone(rawPhone);
+    if (pairingPhone.length < 8) throw new Error('El número ingresado no es válido.');
+  }
 
   const sock = makeWASocket({
     version,
@@ -137,20 +145,11 @@ async function startBot(mode) {
       keys: makeCacheableSignalKeyStore(state.keys, logger),
     },
     logger,
-    browser: ['Termux Bot', 'Chrome', '1.0.0'],
+    // Pairing code exige una identidad de navegador de escritorio válida.
+    browser: Browsers.macOS('Google Chrome'),
     markOnlineOnConnect: false,
     syncFullHistory: false,
   });
-
-  if (mode === 'pairing' && !state.creds.registered) {
-    pairingRequested = true;
-    const rawPhone = process.env.PHONE_NUMBER || await ask('Número con código de país (ejemplo 521234567890): ');
-    const phone = normalizePhone(rawPhone);
-    if (phone.length < 8) throw new Error('El número ingresado no es válido.');
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    const code = await sock.requestPairingCode(phone);
-    console.log(`\nCódigo de vinculación: ${code.match(/.{1,4}/g)?.join('-') || code}\n`);
-  }
 
   sock.ev.on('creds.update', saveCreds);
   sock.ev.on('messages.upsert', (event) => handleMessage(sock, event));
@@ -158,6 +157,21 @@ async function startBot(mode) {
     if (qr && mode === 'qr') {
       console.log('\nEscanea este QR en WhatsApp > Dispositivos vinculados:\n');
       qrcode.generate(qr, { small: true });
+    }
+
+    // Esperar al primer QR garantiza que el WebSocket ya está listo. Pedir el
+    // código antes de este punto puede producir códigos que WhatsApp rechaza.
+    if (qr && mode === 'pairing' && pairingPhone && !pairingRequested) {
+      pairingRequested = true;
+      try {
+        const code = await sock.requestPairingCode(pairingPhone);
+        const displayCode = code.match(/.{1,4}/g)?.join('-') || code;
+        console.log(`\nCódigo de vinculación: ${displayCode}`);
+        console.log('Escríbelo ahora en WhatsApp > Dispositivos vinculados > Vincular con número.\n');
+      } catch (error) {
+        pairingRequested = false;
+        console.error('No se pudo generar un código válido:', error.message);
+      }
     }
 
     if (connection === 'open') {
@@ -176,7 +190,9 @@ async function startBot(mode) {
     }
   });
 
-  if (pairingRequested) console.log('Escribe el código en WhatsApp > Dispositivos vinculados > Vincular con número.');
+  if (mode === 'pairing' && pairingPhone) {
+    console.log('Conectando con WhatsApp para solicitar un código válido...');
+  }
 }
 
 (async () => {
